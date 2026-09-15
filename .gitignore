@@ -1,0 +1,6 @@
+/bin/
+/var/
+*.flac
+*.mp3
+*.wav
+.DS_Store
