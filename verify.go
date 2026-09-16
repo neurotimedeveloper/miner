@@ -20,15 +20,37 @@ const scoreFrames = FPS / 2
 
 // match is one confirmed repeat: the same audio at frames [AStart, AEnd) and
 // at [AStart-Lag, AEnd-Lag).
+//
+// A recording can lose a second in the middle of an airing - a stream
+// dropout, a resync - after which the same repeat continues at a lag shifted
+// by what was lost. Such a match is bridged (see bridgeDropouts) and carries
+// the second lag: from A frame Split on, the B side is at A-Lag2.
 type match struct {
 	AStart, AEnd int
 	Lag          int
+	Split, Lag2  int // Split == 0: one lag throughout
 	// Sim is the mean per-frame cosine over the matched stretch.
 	Sim float64
 }
 
+// lagAt is the lag at A frame a.
+func (m match) lagAt(a int) int {
+	if m.Split > 0 && a >= m.Split {
+		return m.Lag2
+	}
+	return m.Lag
+}
+
+// lagAtB is the lag at B frame b.
+func (m match) lagAtB(b int) int {
+	if m.Split > 0 && b >= m.Split-m.Lag2 {
+		return m.Lag2
+	}
+	return m.Lag
+}
+
 func (m match) BStart() int { return m.AStart - m.Lag }
-func (m match) BEnd() int   { return m.AEnd - m.Lag }
+func (m match) BEnd() int   { return m.AEnd - m.lagAt(m.AEnd-1) }
 func (m match) Len() int    { return m.AEnd - m.AStart }
 
 // verifier grows matches on a timeline under the thresholds.

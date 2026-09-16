@@ -6,8 +6,10 @@ Working notes for this repository. Read `README.md` for usage and
 ## Where things stand
 
 Read `docs/HANDOVER.md` first. Short form: the method is proven on synthetic
-truth and runs on real data; the first full-month run is not yet complete; no
-spot list has been supplied, so recall against the list is unmeasured.
+truth; a real month runs on the server in 24 min at 5.2 GB; fragmentation was
+measured against the output's own audio (287 of 6 813 spot clusters were
+duplicates) and two causes fixed; no spot list has been supplied, so recall
+against the list is unmeasured.
 
 ## What this is
 
@@ -43,10 +45,11 @@ features.go     log-mel frames at 20 fps, 512 ms analysis frame; gain and runnin
 index.go        window descriptors (2-D DCT) and the seeded LSH index; descriptorStream for per-frame queries
 verify.go       lag refinement, growth with hysteresis, the sliding half-second score
 cluster.go      boundary votes, atomic segments, union-find, always-adjacent joining
-classify.go     spot / non-spot with a reason per cluster
+merge.go        the second pass: cluster references mined against each other, same-audio clusters joined
+classify.go     spot / non-spot with a reason per cluster; pieces of a >120 s unit are not spots
 timeline.go     inputs on one frame axis, with discontinuities recorded
 synth_test.go   the synthetic broadcast with known truth, and the evaluator
-calibrate_test.go / audit_test.go   hand-run diagnostics on real audio (env-gated)
+calibrate_test.go / audit_test.go / trace_test.go / frag_test.go   hand-run diagnostics on real audio (env-gated)
 scripts/summarise.py   what a clusters.json contains, and what looks wrong in it
 cmd/miner/      CLI, JSON, report
 internal/ff/    ffmpeg runner: timeouts, process groups, streamed decode, extraction
@@ -68,6 +71,9 @@ internal/pieces/ file names and manifests -> inputs
 | Never match two stretches closer than `MinLagSec` | A chorus repeats inside its song every minute; on a real day 448 of 557 "spots" were choruses. Airings hours apart link the rest. |
 | Never keep a match that sits inside a longer match at another lag | It is the longer repeat's own periodicity; kept, it cuts every song into verse-sized "spots". |
 | Never keep a 61-minute file's overlap with the next | It is a repeat of itself at every hour. |
+| Never count votes from one damaged airing as independent | A 1.3 s dropout in one airing of a song broke its three matches at the same point; three "distinct" votes cut every airing. Continuations within 5 s are bridged into one match with two lags. |
+| Never merge clusters on the share of the SHORTER reference | A 3 s stinger absorbed every spot it sat in; a 44 s spot swallowed its 26 s cut-down. The share is of the longer. |
+| Never dedupe or bridge matches across a break | Excerpts laid side by side matched as one 34 s repeat because their lags agreed; a stinger then absorbed a spot. |
 | Never let a map iteration reach the output | Determinism is an acceptance criterion. |
 
 ## Gotchas found the hard way
@@ -77,9 +83,15 @@ internal/pieces/ file names and manifests -> inputs
   4096-point transform per hop, which gave the same separation (same p05 0.58
   vs 0.59, different p95 0.25 vs 0.23) at eighty times the cost. Changing the
   span changes every threshold; `TestCalibrate` is how they were set.
-- **`TestCalibrate` and `TestAudit` are hand-run diagnostics**, gated by
-  environment variables. Use them before and after any change to features or
-  thresholds; the numbers in DESIGN.md come from them.
+- **`TestCalibrate`, `TestAudit`, `TestSimTrace` and `TestFragmentation` are
+  hand-run diagnostics**, gated by environment variables. Use them before and
+  after any change to features or thresholds; the numbers in DESIGN.md come
+  from them. `TestFragmentation` needs the month's clusters.json and the audio
+  (`FRAG=... FRAG_IN=...`); it decodes for 20 minutes once and caches the
+  excerpts beside the JSON. `-dump-matches FILE` on the CLI writes every
+  confirmed match as times; `MINER_DEBUG_MERGE=1` logs every same-audio join.
+- **`mineTimeline` is `Mine` without the decoding.** Anything that assembles a
+  timeline some other way (excerpts, fixtures) mines it through that.
 - **The synthetic voice must be varied.** An early generator with a narrow
   pitch range made unrelated stretches agree over 512 ms frames in a way real
   speech does not, and made the method look broken. `voice.render` has two

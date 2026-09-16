@@ -155,6 +155,35 @@ long, at a different lag, is dropped as that longer repeat's internal
 periodicity. Measured on the day: 1299 clusters and 557 "spots" became 216 and
 78, and the eleven songs played twice came out whole, at 140-209 s.
 
+**Not splitting on a dropout.** One airing of a four-minute song on the real
+month had lost 1.3 s to a stream dropout. Every match between that airing and
+the other three broke at the dropout into a 104 s and a 145 s match at lags
+1.3 s apart - three matches, and so three "distinct" votes for a cut at 104 s,
+which cut every airing of the song in two and made the 104 s piece a spot.
+The votes were not independent: all three came from the one damaged airing,
+and what shows it is the *continuation* - the same pair of airings agrees
+again within five seconds at a lag shifted by no more than the hole. Two such
+matches are bridged into one that carries both lags (`bridgeDropouts`), and
+the junction is a boundary nobody voted for. The same shape would split a
+spot on the month one of its airings had a dropout.
+
+**Not splitting on a soft edge, or a starved match.** After clustering, the
+clusters are checked against each other the way the broadcast was: one
+reference airing per cluster, laid on a timeline with a break between each,
+mined once more. Two references that agree over 80 % of the *longer* one are
+the same audio and their clusters are joined, the smaller cluster's airings
+re-placed against the larger one's reference. This catches what the atomic
+segments miss for reasons that are individually rare and collectively not: an
+element whose fade-out puts its end anywhere within a second and a half came
+out as twelve clusters of 8-10 s, because segments whose ends differ by more
+than the half-second tolerance never unite; a spot's long-tagged version that
+aired in one week matched only long airings under the per-frame cap and kept
+its own cluster. Measured on the real month before the fix: 287 of 6 813 spot
+clusters were wholly the same audio as another. The share is of the longer
+reference on purpose: measured against the shorter, a 3 s stinger absorbed
+every spot it sat inside, and a 44 s spot swallowed its own 26 s cut-down.
+Cost: one more mining pass over about 80 hours of excerpts, under a minute.
+
 **Not merging two similar spots.** Similar is not the same: two spots from one
 campaign share a voice and a bed but not their frames, and the per-frame
 correlation over half a second separates them where a fingerprint's sparse
@@ -170,9 +199,11 @@ right answer. A spot whose two airings differ by more than the thresholds allow
 (a heavily re-processed rebroadcast) is not found as one; the thresholds can be
 moved, at the cost of letting different audio in.
 
-Implementation: `verify.go`, `cluster.go`; defaults in `options.go`.
+Implementation: `verify.go`, `cluster.go`, `merge.go`; defaults in `options.go`.
 Tests: `TestGainDifferencesDoNotSplitASpot`, `TestASharedTailDoesNotMergeTwoSpots`,
-`TestBoundaryVotesDropLoneCutsAndCarryAgreedOnes`.
+`TestBoundaryVotesDropLoneCutsAndCarryAgreedOnes`,
+`TestADropoutInOneAiringDoesNotCutTheOthers`; `TestFragmentation` re-measures a
+finished month against its own audio.
 
 ## 4. Segment boundaries when the surrounding content differs
 
@@ -231,12 +262,16 @@ Tests: `TestPairedSpotsDoNotFragment`, `TestASongIsANonSpotAndSwallowsNothing`,
 Nothing in the audio says "advertisement". The broadcast does show how a
 repeat behaves, and that is what is used, in this order:
 
-1. **Under 8 s** is not a spot: an ident, a stinger, a sound effect.
-2. **Over 120 s** is not a spot: a song, a programme element.
-3. **At the same minute of the hour** in 80 % or more of its airings (given at
+1. **A piece of a unit longer than 120 s** is not a spot. Clusters whose
+   airings follow each other in the same order in 80 % of cases, both ways,
+   are pieces of one thing; a four-minute song that came out as 104 s + 145 s
+   is still a song, though its first piece is spot-length.
+2. **Under 8 s** is not a spot: an ident, a stinger, a sound effect.
+3. **Over 120 s** is not a spot: a song, a programme element.
+4. **At the same minute of the hour** in 80 % or more of its airings (given at
    least four) is not a spot: a news sting, an hourly ident, a scheduled
    element - a sold slot lands where the sales house sold it.
-4. Otherwise it is a spot. The reason records whether its airings are
+5. Otherwise it is a spot. The reason records whether its airings are
    *accompanied* - another repeat within two seconds before or after, which is
    what an advertising block looks like - or alone.
 
@@ -248,7 +283,7 @@ real list, and they have been tuned only against synthetic material and one
 real hour. A 6-second spot is called an ident; a 130-second infomercial a
 programme element; a spot the station itself runs at the top of every hour, a
 scheduled element. The rules are in one function with the thresholds named at
-its head. Speech-versus-music inside the repeat would sharpen rule 3 and is the
+its head. Speech-versus-music inside the repeat would sharpen rule 4 and is the
 first thing to add when the list shows it is needed.
 
 Implementation: `classify.go`. Test: `TestClassifyReasonsByDurationRegularityAndCompany`.

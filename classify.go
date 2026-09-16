@@ -28,19 +28,21 @@ const (
 	// repeat is a scheduled element - a news sting, an hourly ident - rather
 	// than a spot placed wherever the sales house sold the slot.
 	hourlyShare = 0.8
+
+	// unitShare is the share of two clusters' airings that must follow each
+	// other, in both directions, for the two to be pieces of one unit; and
+	// unitGapSec how far apart the pieces may sit - a dropout's worth.
+	unitShare  = 0.8
+	unitGapSec = 5.0
 )
 
 // classify sets IsSpot and Reason on every cluster.
 func classify(clusters []Cluster) {
 	// Every airing of every cluster, sorted, for adjacency lookups.
-	type airing struct {
-		start, end time.Time
-		cluster    int
-	}
-	var all []airing
+	var all []placedAiring
 	for i, c := range clusters {
 		for _, o := range c.Occurrences {
-			all = append(all, airing{o.Start, o.End, i})
+			all = append(all, placedAiring{o.Start, o.End, i})
 		}
 	}
 	sort.Slice(all, func(a, b int) bool { return all[a].start.Before(all[b].start) })
@@ -49,11 +51,20 @@ func classify(clusters []Cluster) {
 		starts[i] = a.start
 	}
 	gap := time.Duration(neighbourGapSec * float64(time.Second))
+	unitLen := unitLengths(clusters, all, starts)
 
 	for i := range clusters {
 		c := &clusters[i]
 		n := len(c.Occurrences)
 		switch {
+		case unitLen[i].sec > spotMaxSec:
+			// A song cut into pieces is still a song. A four-minute song came
+			// out as 104 s + 145 s on the real month, and a 104 s piece is
+			// spot-length; what gives it away is that the pieces never air
+			// apart.
+			c.IsSpot = false
+			c.Reason = fmt.Sprintf("%.1fs, one of %d pieces of a %.0fs unit that always airs as one; a song or a programme element", c.DurationSec, unitLen[i].pieces, unitLen[i].sec)
+			continue
 		case c.DurationSec < spotMinSec:
 			c.IsSpot = false
 			c.Reason = fmt.Sprintf("%.1fs is shorter than a spot; an ident, a stinger or a sound effect", c.DurationSec)
@@ -110,4 +121,87 @@ func classify(clusters []Cluster) {
 			c.Reason = fmt.Sprintf("%.1fs, %d airings, none adjacent to another repeat: spot-length, but airs alone", c.DurationSec, n)
 		}
 	}
+}
+
+// placedAiring is one occurrence with the index of its cluster, for adjacency
+// lookups across clusters.
+type placedAiring struct {
+	start, end time.Time
+	cluster    int
+}
+
+// unit is what a cluster is a piece of: the summed length of every cluster
+// that always airs joined to it, and how many pieces there are.
+type unit struct {
+	sec    float64
+	pieces int
+}
+
+// unitLengths finds clusters that always air in the same order, back to back,
+// and reports for each cluster the total length of the unit it is a piece of.
+//
+// "Always" is unitShare of the airings, in both directions: a piece that
+// sometimes airs alone is its own repeat, and a spot that opens most
+// advertising blocks is not a piece of what follows it.
+func unitLengths(clusters []Cluster, all []placedAiring, starts []time.Time) []unit {
+	out := make([]unit, len(clusters))
+	for i, c := range clusters {
+		out[i] = unit{c.DurationSec, 1}
+	}
+	if len(clusters) == 0 {
+		return out
+	}
+	gap := time.Duration(unitGapSec * float64(time.Second))
+	// next[i][j]: how many airings of i are followed within gap by j.
+	next := make([]map[int]int, len(clusters))
+	for i := range next {
+		next[i] = map[int]int{}
+	}
+	for _, a := range all {
+		lo := sort.Search(len(all), func(k int) bool { return !starts[k].Before(a.end.Add(-time.Second)) })
+		for k := lo; k < len(all) && !all[k].start.After(a.end.Add(gap)); k++ {
+			if all[k].cluster != a.cluster {
+				next[a.cluster][all[k].cluster]++
+			}
+		}
+	}
+	parent := make([]int, len(clusters))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(x int) int {
+		for parent[x] != x {
+			parent[x] = parent[parent[x]]
+			x = parent[x]
+		}
+		return x
+	}
+	for i := range clusters {
+		ni := len(clusters[i].Occurrences)
+		for j, n := range next[i] {
+			nj := len(clusters[j].Occurrences)
+			if float64(n) >= unitShare*float64(ni) && float64(n) >= unitShare*float64(nj) {
+				a, b := find(i), find(j)
+				if a != b {
+					if a > b {
+						a, b = b, a
+					}
+					parent[b] = a
+				}
+			}
+		}
+	}
+	sums := map[int]unit{}
+	for i, c := range clusters {
+		r := find(i)
+		u := sums[r]
+		u.sec += c.DurationSec
+		u.pieces++
+		sums[r] = u
+	}
+	for i := range clusters {
+		out[i] = sums[find(i)]
+	}
+	return out
 }

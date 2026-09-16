@@ -35,8 +35,10 @@ func run() error {
 		in, manifest, out, temp, tz, pattern string
 		minRepeat, maxRepeat, minLag         float64
 		seed                                 int64
+		memLimitGB                           float64
 		timeout, maxConc                     int
 		noReps, asJSON, strict               bool
+		dumpMatches                          string
 	)
 	fs := flag.NewFlagSet("miner", flag.ContinueOnError)
 	fs.StringVar(&in, "in", "", "directory of broadcast files (names begin with the broadcast timestamp)")
@@ -49,9 +51,11 @@ func run() error {
 	fs.Float64Var(&maxRepeat, "max-repeat", miner.DefaultMaxRepeatSec, "longest match grown from one seed, seconds")
 	fs.Float64Var(&minLag, "min-lag", miner.DefaultMinLagSec, "two stretches closer than this are not two airings (a chorus inside a track), seconds")
 	fs.Int64Var(&seed, "seed", miner.DefaultSeed, "seed for the index; the same seed gives the same clusters")
+	fs.Float64Var(&memLimitGB, "memory-limit", 6, "soft memory limit for the Go collector, GB (0 = default)")
 	fs.IntVar(&timeout, "ffmpeg-timeout", miner.DefaultFFmpegTimeoutSec, "per-ffmpeg-call timeout, seconds")
 	fs.IntVar(&maxConc, "max-concurrent", miner.DefaultMaxConcurrent, "parallel ffmpeg processes")
 	fs.BoolVar(&noReps, "no-representatives", false, "do not write an audio sample per cluster")
+	fs.StringVar(&dumpMatches, "dump-matches", "", "diagnostic: write every confirmed match, as times, to this file")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON to stdout")
 	fs.BoolVar(&strict, "strict", false, "fail if any input file name could not be understood")
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -102,7 +106,9 @@ func run() error {
 		Inputs: inputs, TempDir: temp, OutDir: out,
 		FFmpegTimeoutSec: timeout, MaxConcurrent: maxConc,
 		MinRepeatSec: minRepeat, MaxRepeatSec: maxRepeat, MinLagSec: minLag, Seed: seed,
-		Representatives: !noReps,
+		Representatives:  !noReps,
+		DumpMatches:      dumpMatches,
+		MemoryLimitBytes: int64(memLimitGB * 1e9),
 		Progress: func(stage string, done, total int) {
 			switch stage {
 			case "features":

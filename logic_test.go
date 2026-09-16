@@ -3,6 +3,7 @@ package miner
 import (
 	"math"
 	"math/cmplx"
+	"sort"
 	"testing"
 	"time"
 )
@@ -163,9 +164,15 @@ func TestClassifyReasonsByDurationRegularityAndCompany(t *testing.T) {
 		{ID: 3, DurationSec: 30, Occurrences: occ(30, 10*time.Minute, 70*time.Minute, 130*time.Minute, 190*time.Minute)}, // always minute 10
 		{ID: 4, DurationSec: 30, Occurrences: occ(30, 20*time.Minute, 33*time.Minute, 95*time.Minute)},
 		{ID: 5, DurationSec: 20, Occurrences: occ(20, 20*time.Minute+30*time.Second, 95*time.Minute+30*time.Second)}, // right after 4
+		// 6 and 7: a song cut in two. Each piece is spot-length; together they
+		// are 190 s, and they never air apart.
+		{ID: 6, DurationSec: 100, Occurrences: occ(100, 4*time.Hour, 5*time.Hour, 6*time.Hour)},
+		{ID: 7, DurationSec: 90, Occurrences: occ(90, 4*time.Hour+101*time.Second, 5*time.Hour+101*time.Second, 6*time.Hour+101*time.Second)},
+		// 8 follows 7 once - not a piece of it.
+		{ID: 8, DurationSec: 15, Occurrences: occ(15, 4*time.Hour+192*time.Second, 7*time.Hour, 8*time.Hour)},
 	}
 	classify(cs)
-	want := []bool{false, false, false, true, true}
+	want := []bool{false, false, false, true, true, false, false, true}
 	for i, c := range cs {
 		if c.IsSpot != want[i] {
 			t.Errorf("cluster %d: IsSpot=%v, want %v (%s)", c.ID, c.IsSpot, want[i], c.Reason)
@@ -211,5 +218,70 @@ func TestOverlappingFilesAreJoinedWithoutDuplicatingTheOverlap(t *testing.T) {
 	path, at, _ := tl.locate(3600*FPS + 5)
 	if path != "h1" || !at.Equal(base.Add(time.Hour+250*time.Millisecond)) {
 		t.Errorf("locate after the join: %s %s", path, at)
+	}
+}
+
+// One airing with a dropout must not cut every airing of the repeat in two.
+// Four airings of a 5000-frame song; the fourth lost 26 frames at its 2000th
+// frame, so its three matches against the earlier airings each break there.
+func TestADropoutInOneAiringDoesNotCutTheOthers(t *testing.T) {
+	const L = 5000
+	starts := []int{10000, 30000, 50000, 70000}
+	var ms []match
+	// The three intact airings match each other whole.
+	for i := 1; i < 3; i++ {
+		for j := 0; j < i; j++ {
+			ms = append(ms, match{AStart: starts[i], AEnd: starts[i] + L, Lag: starts[i] - starts[j], Sim: 0.9})
+		}
+	}
+	// The damaged airing: [70000, 72000) at lag d, then, after 20 frames
+	// that match nothing, the rest of the song 26 frames earlier than it
+	// should be - so at lag d-26, ending 26 frames early.
+	for j := 0; j < 3; j++ {
+		d := starts[3] - starts[j]
+		ms = append(ms,
+			match{AStart: 70000, AEnd: 72000, Lag: d, Sim: 0.9},
+			match{AStart: 72020, AEnd: 70000 + L - 26, Lag: d - 26, Sim: 0.9})
+	}
+	sort.Slice(ms, func(a, b int) bool {
+		if ms[a].AStart != ms[b].AStart {
+			return ms[a].AStart < ms[b].AStart
+		}
+		return ms[a].Lag < ms[b].Lag
+	})
+	bridged := bridgeDropouts(ms, &timeline{}, 300*FPS)
+	if len(bridged) != 6 {
+		t.Fatalf("%d matches after bridging, want 6 (three pairs joined): %+v", len(bridged), bridged)
+	}
+	for _, m := range bridged {
+		if m.AStart == 70000 {
+			if m.Split != 72020 || m.Lag2 != m.Lag-26 || m.AEnd != 70000+L-26 {
+				t.Errorf("bridged match carries the wrong lags: %+v", m)
+			}
+			if m.BEnd() != m.AEnd-m.Lag2 {
+				t.Errorf("BEnd uses the first lag after the split: %+v", m)
+			}
+		}
+	}
+	groups := buildClusters(bridged, 60)
+	if len(groups) != 1 {
+		t.Fatalf("%d clusters, want 1: a dropout in one airing split the song for every airing: %v", len(groups), groups)
+	}
+	if n := len(groups[0]); n != 4 {
+		t.Errorf("%d airings, want 4: the damaged airing was lost", n)
+	}
+	for _, s := range groups[0] {
+		if s.Start != 70000 && s.Len() != L {
+			t.Errorf("intact airing %v is not whole", s)
+		}
+	}
+	// Two different spots that follow each other are NOT bridged: the B side
+	// does not continue.
+	other := []match{
+		{AStart: 1000, AEnd: 1500, Lag: 500000, Sim: 0.9},
+		{AStart: 1510, AEnd: 2000, Lag: 700000, Sim: 0.9},
+	}
+	if got := bridgeDropouts(other, &timeline{}, 300*FPS); len(got) != 2 {
+		t.Errorf("unrelated consecutive matches were bridged: %+v", got)
 	}
 }

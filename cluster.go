@@ -116,6 +116,8 @@ func dropInternalRepeats(matches []match) []match {
 	return kept
 }
 
+var debugCuts func(pos int, ids []int32, inside bool)
+
 // buildClusters turns matches into clusters of atomic segments.
 func buildClusters(matches []match, minLen int) [][]segment {
 	if len(matches) == 0 {
@@ -140,7 +142,7 @@ func buildClusters(matches []match, minLen int) [][]segment {
 			if segs[i].End > m.AEnd+boundaryTol {
 				continue
 			}
-			j := segmentAt(segs, starts, segs[i].Start-m.Lag, segs[i].End-m.Lag)
+			j := segmentAt(segs, starts, segs[i].Start-m.lagAt(segs[i].Start), segs[i].End-m.lagAt(segs[i].End-1))
 			if j >= 0 {
 				cs.union(i, j)
 			}
@@ -265,10 +267,16 @@ func collectBoundaries(matches []match) []int {
 	}
 	carried := votes
 	for _, m := range matches {
-		for _, side := range []struct{ s, e, shift int }{{m.AStart, m.AEnd, -m.Lag}, {m.BStart(), m.BEnd(), +m.Lag}} {
+		for _, side := range []struct {
+			s, e  int
+			shift func(p int) int
+		}{
+			{m.AStart, m.AEnd, func(p int) int { return p - m.lagAt(p) }},
+			{m.BStart(), m.BEnd(), func(p int) int { return p + m.lagAtB(p) }},
+		} {
 			lo := sort.SearchInts(pos, side.s+boundaryTol+1)
 			for k := lo; k < len(cuts) && cuts[k].pos < side.e-boundaryTol; k++ {
-				p := int32(cuts[k].pos + side.shift)
+				p := int32(side.shift(cuts[k].pos))
 				for _, id := range cuts[k].ids {
 					carried = append(carried, vote{p, id})
 				}
@@ -291,6 +299,9 @@ func collectBoundaries(matches []match) []int {
 	}
 	var out []int
 	for _, c := range cuts {
+		if debugCuts != nil {
+			debugCuts(c.pos, c.ids, strictlyInside(c.pos))
+		}
 		if len(c.ids) >= 2 || !strictlyInside(c.pos) {
 			out = append(out, c.pos)
 		}

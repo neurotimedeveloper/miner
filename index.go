@@ -167,6 +167,38 @@ func distance(a, b *Descriptor) float64 {
 	return math.Sqrt(s)
 }
 
+// QDescriptor is a stored descriptor: one signed byte per component. A unit
+// vector's components lie in [-1, 1], so the step is 1/127 - a hundredth of
+// the seed distance - and a month's descriptors are 170 MB rather than 690.
+type QDescriptor [DescriptorDim]int8
+
+const qScale = 127
+
+func quantize(d *Descriptor) QDescriptor {
+	var q QDescriptor
+	for i, v := range d {
+		x := math.Round(float64(v) * qScale)
+		if x > 127 {
+			x = 127
+		}
+		if x < -127 {
+			x = -127
+		}
+		q[i] = int8(x)
+	}
+	return q
+}
+
+// distanceQ is distance against a stored descriptor.
+func distanceQ(a *Descriptor, b *QDescriptor) float64 {
+	var s float64
+	for i := range a {
+		d := float64(a[i]) - float64(b[i])/qScale
+		s += d * d
+	}
+	return math.Sqrt(s)
+}
+
 // lshIndex is the candidate index: per table a sorted list of (hash, window).
 type lshIndex struct {
 	planes [lshTables][lshBits]Descriptor
@@ -201,17 +233,22 @@ func (ix *lshIndex) hash(t int, d *Descriptor) uint32 {
 	return h
 }
 
-// build indexes descriptors [0, n). Windows are numbered by position, so the
-// index is rebuilt in one sorted pass rather than maintained incrementally:
-// sorting ten million keys is cheaper than a hash map holding them.
-func (ix *lshIndex) build(descs []Descriptor) {
+// hashInto appends the next window's keys to every table; windows are
+// numbered in the order they are added. finish sorts the tables. Building in
+// one sorted pass is cheaper than a hash map holding ten million keys, and
+// hashing as the descriptor streams by means the float descriptor never has
+// to be kept - only its quantised copy is.
+func (ix *lshIndex) hashInto(d *Descriptor) {
+	w := uint64(len(ix.tables[0]))
 	for t := 0; t < lshTables; t++ {
-		keys := make([]uint64, len(descs))
-		for w := range descs {
-			keys[w] = uint64(ix.hash(t, &descs[w]))<<32 | uint64(w)
-		}
+		ix.tables[t] = append(ix.tables[t], uint64(ix.hash(t, d))<<32|w)
+	}
+}
+
+func (ix *lshIndex) finish() {
+	for t := 0; t < lshTables; t++ {
+		keys := ix.tables[t]
 		sort.Slice(keys, func(a, b int) bool { return keys[a] < keys[b] })
-		ix.tables[t] = keys
 	}
 }
 

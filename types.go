@@ -60,11 +60,19 @@ type Options struct {
 	// Representatives controls whether audio samples are written for clusters.
 	Representatives bool
 
+	// MemoryLimitBytes is a soft limit for Go's garbage collector for the
+	// duration of the run (see runtime/debug.SetMemoryLimit). Zero leaves the
+	// process default. The CLI sets it from -memory-limit.
+	MemoryLimitBytes int64
+
 	// Progress, when set, is called as the run advances: a month of audio is
 	// tens of minutes, and a run that says nothing for that long looks hung.
 	Progress func(stage string, done, total int)
 	// Debug, when set, receives every confirmed match. Diagnostics only.
 	Debug func(m match)
+	// DumpMatches, when set, is a file that receives every confirmed match
+	// as broadcast times, one per line, before clustering. Diagnostics only.
+	DumpMatches string
 }
 
 func (o Options) progress(stage string, done, total int) {

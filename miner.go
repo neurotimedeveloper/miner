@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -24,6 +25,16 @@ func Mine(ctx context.Context, opt Options) (Result, error) {
 	if err := opt.normalize(); err != nil {
 		return res, err
 	}
+	// Go's collector lets the heap grow to twice its live size before it runs.
+	// With two gigabytes of features live that is two gigabytes of garbage
+	// kept around by default, and the month ran at 9.7 GB against a 10 GB
+	// ceiling. A soft limit makes the collector work harder as the limit
+	// nears instead; it is a target, not a cap, so the run does not fail if
+	// the live data alone exceeds it.
+	if opt.MemoryLimitBytes > 0 {
+		prev := debug.SetMemoryLimit(opt.MemoryLimitBytes)
+		defer debug.SetMemoryLimit(prev)
+	}
 	runner := ff.NewRunner("ffmpeg", "ffprobe", time.Duration(opt.FFmpegTimeoutSec)*time.Second, opt.MaxConcurrent)
 	if err := runner.Check(ctx); err != nil {
 		return res, err
@@ -38,104 +49,55 @@ func Mine(ctx context.Context, opt Options) (Result, error) {
 	sort.SliceStable(inputs, func(a, b int) bool { return inputs[a].Start.Before(inputs[b].Start) })
 
 	// --- features: every file decoded once, in parallel, added in order ------
+	//
+	// Files are decoded in batches of MaxConcurrent, in Start order, and each
+	// batch is appended to the timeline before the next begins. Decoding all
+	// 744 first and copying afterwards held the month's features twice.
 	type decoded struct {
 		frames []Frame
 		err    error
 	}
-	outs := make([]decoded, len(inputs))
-	var wg sync.WaitGroup
-	var doneMu sync.Mutex
+	// Reserve the timeline for hour-long files up front: untouched pages cost
+	// nothing, while letting the slice double as it grows would hold two
+	// copies of the features at the last reallocation. Longer files simply
+	// grow it.
+	reserve := len(inputs) * 3660 * FPS
+	tl := &timeline{frames: make([]Frame, 0, reserve), norms: make([]float32, 0, reserve)}
 	done := 0
-	for i, in := range inputs {
-		wg.Add(1)
-		go func(i int, in Input) {
-			defer wg.Done()
-			frames, _, err := extractFile(ctx, runner, in.Path)
-			outs[i] = decoded{frames, err}
-			doneMu.Lock()
+	for batch := 0; batch < len(inputs); batch += opt.MaxConcurrent {
+		hi := minInt(batch+opt.MaxConcurrent, len(inputs))
+		outs := make([]decoded, hi-batch)
+		var wg sync.WaitGroup
+		for i := batch; i < hi; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				frames, _, err := extractFile(ctx, runner, inputs[i].Path)
+				outs[i-batch] = decoded{frames, err}
+			}(i)
+		}
+		wg.Wait()
+		for i := batch; i < hi; i++ {
+			in, o := inputs[i], outs[i-batch]
 			done++
 			opt.progress("features", done, len(inputs))
-			doneMu.Unlock()
-		}(i, in)
-	}
-	wg.Wait()
-
-	// Size the timeline once: growing it by appends would hold two copies of
-	// the features at the moment of every reallocation, and features are the
-	// largest thing in memory.
-	nFrames := 0
-	for _, o := range outs {
-		nFrames += len(o.frames)
-	}
-	tl := &timeline{frames: make([]Frame, 0, nFrames), norms: make([]float32, 0, nFrames)}
-	for i, in := range inputs {
-		if outs[i].err != nil {
-			res.Skipped = append(res.Skipped, SkippedFile{Path: in.Path, Reason: outs[i].err.Error()})
-			continue
+			if o.err != nil {
+				res.Skipped = append(res.Skipped, SkippedFile{Path: in.Path, Reason: o.err.Error()})
+				continue
+			}
+			if len(o.frames) == 0 {
+				res.Skipped = append(res.Skipped, SkippedFile{Path: in.Path, Reason: "decoded to no audio"})
+				continue
+			}
+			tl.add(in.Path, in.Start, o.frames)
+			res.Stats.Files++
 		}
-		if len(outs[i].frames) == 0 {
-			res.Skipped = append(res.Skipped, SkippedFile{Path: in.Path, Reason: "decoded to no audio"})
-			continue
-		}
-		tl.add(in.Path, in.Start, outs[i].frames)
-		res.Stats.Files++
-		outs[i].frames = nil
 	}
+	debug.FreeOSMemory()
 	if len(tl.frames) == 0 {
 		return res, fmt.Errorf("%w: every input was skipped", ErrNothingToMine)
 	}
-	res.Stats.Frames = len(tl.frames)
-	res.Stats.AudioSec = float64(len(tl.frames)) / FPS
-	res.Stats.FeatureBytes = int64(len(tl.frames)) * (Bands + 4)
-
-	// --- windows and index ---------------------------------------------------
-	basis := newDCTBasis()
-	var descs []Descriptor
-	var winAt []int
-	for at := 0; at+WindowFrames <= len(tl.frames); at += WindowStep {
-		if tl.breakBetween(at, at+WindowFrames-1) {
-			continue
-		}
-		descs = append(descs, basis.describe(tl.frames, at))
-		winAt = append(winAt, at)
-	}
-	res.Stats.Windows = len(descs)
-	ix := newLSHIndex(opt.Seed)
-	ix.build(descs)
-	opt.progress("index", len(descs), len(descs))
-	res.Stats.IndexBytes = int64(len(descs)) * (DescriptorDim*4 + lshTables*8)
-
-	// --- candidates, verified -------------------------------------------------
-	v := &verifier{
-		tl:      tl,
-		simHigh: opt.SimHigh,
-		simLow:  opt.SimLow,
-		maxDip:  int(opt.MaxDipSec * FPS),
-		// A repeat of length L agrees over about L minus half an analysis
-		// frame: the frames straddling its edges are half something else.
-		minLen:   int(opt.MinRepeatSec*FPS) - SmoothFrames/2,
-		maxLen:   int(opt.MaxRepeatSec * FPS),
-		lagSlack: WindowStep/2 + 1,
-	}
-	matches, seeds, verified := searchAll(ctx, opt, tl, descs, winAt, ix, basis, v)
-	res.Stats.SeedPairs, res.Stats.VerifiedPairs = seeds, verified
-	res.Stats.Matches = len(matches)
-
-	// --- clusters -------------------------------------------------------------
-	groups := buildClusters(matches, v.minLen)
-	for id, g := range groups {
-		g = refineAirings(tl, g)
-		c := Cluster{ID: id + 1, DurationSec: float64(medianLen(g)) / FPS}
-		for _, s := range g {
-			path, at, off := tl.locate(s.Start)
-			c.Occurrences = append(c.Occurrences, Occurrence{
-				Start: at, End: at.Add(time.Duration(float64(s.Len()) / FPS * float64(time.Second))),
-				File: path, OffsetSec: off,
-			})
-		}
-		res.Clusters = append(res.Clusters, c)
-	}
-	classify(res.Clusters)
+	res.Clusters = mineTimeline(ctx, opt, tl, &res.Stats)
 
 	// --- representatives ------------------------------------------------------
 	if opt.Representatives {
@@ -159,6 +121,87 @@ func Mine(ctx context.Context, opt Options) (Result, error) {
 	return res, nil
 }
 
+// mineTimeline is everything after decoding: the repeats of a timeline, as
+// classified clusters. It is separate from Mine so a timeline assembled some
+// other way - a set of excerpts, a fixture - can be mined the same way.
+func mineTimeline(ctx context.Context, opt Options, tl *timeline, stats *Stats) []Cluster {
+	stats.Frames = len(tl.frames)
+	stats.AudioSec = float64(len(tl.frames)) / FPS
+	stats.FeatureBytes = int64(len(tl.frames)) * (Bands + 4)
+
+	matches, minLen := findMatches(ctx, opt, tl, stats)
+	if opt.DumpMatches != "" {
+		dumpMatches(opt.DumpMatches, tl, matches)
+	}
+
+	// --- clusters -------------------------------------------------------------
+	groups := buildClusters(matches, minLen)
+	for i, g := range groups {
+		groups[i] = refineAirings(tl, g)
+	}
+	groups = mergeSameAudio(ctx, opt, tl, groups)
+	var clusters []Cluster
+	for id, g := range groups {
+		c := Cluster{ID: id + 1, DurationSec: float64(medianLen(g)) / FPS}
+		for _, s := range g {
+			path, at, off := tl.locate(s.Start)
+			c.Occurrences = append(c.Occurrences, Occurrence{
+				Start: at, End: at.Add(time.Duration(float64(s.Len()) / FPS * float64(time.Second))),
+				File: path, OffsetSec: off,
+			})
+		}
+		clusters = append(clusters, c)
+	}
+	classify(clusters)
+	return clusters
+}
+
+// findMatches is the search: windows, index, candidates, verification. It
+// returns the confirmed matches and the shortest length a repeat may have.
+func findMatches(ctx context.Context, opt Options, tl *timeline, stats *Stats) ([]match, int) {
+	// --- windows and index ---------------------------------------------------
+	basis := newDCTBasis()
+	ix := newLSHIndex(opt.Seed)
+	nWin := (len(tl.frames)-WindowFrames)/WindowStep + 1
+	if nWin < 0 {
+		nWin = 0
+	}
+	descs := make([]QDescriptor, 0, nWin)
+	winAt := make([]int, 0, nWin)
+	stream := newDescriptorStream(basis, tl.frames)
+	for at := 0; at+WindowFrames <= len(tl.frames); at += WindowStep {
+		if tl.breakBetween(at, at+WindowFrames-1) {
+			continue
+		}
+		d := stream.at(at)
+		ix.hashInto(&d)
+		descs = append(descs, quantize(&d))
+		winAt = append(winAt, at)
+	}
+	stats.Windows += len(descs)
+	ix.finish()
+	opt.progress("index", len(descs), len(descs))
+	stats.IndexBytes += int64(len(descs)) * (DescriptorDim + lshTables*8)
+
+	// --- candidates, verified -------------------------------------------------
+	v := &verifier{
+		tl:      tl,
+		simHigh: opt.SimHigh,
+		simLow:  opt.SimLow,
+		maxDip:  int(opt.MaxDipSec * FPS),
+		// A repeat of length L agrees over about L minus half an analysis
+		// frame: the frames straddling its edges are half something else.
+		minLen:   int(opt.MinRepeatSec*FPS) - SmoothFrames/2,
+		maxLen:   int(opt.MaxRepeatSec * FPS),
+		lagSlack: WindowStep/2 + 1,
+	}
+	matches, seeds, verified := searchAll(ctx, opt, tl, descs, winAt, ix, basis, v)
+	stats.SeedPairs += seeds
+	stats.VerifiedPairs += verified
+	stats.Matches += len(matches)
+	return matches, v.minLen
+}
+
 // searchAll runs the candidate search over the whole timeline, in parallel
 // chunks of query frames.
 //
@@ -168,7 +211,7 @@ func Mine(ctx context.Context, opt Options) (Result, error) {
 // not know of it; the same repeat can then be found twice with the same lag,
 // and those are merged afterwards. Chunks are concatenated in order, so the
 // result does not depend on which finished first.
-func searchAll(ctx context.Context, opt Options, tl *timeline, descs []Descriptor, winAt []int, ix *lshIndex, basis *dctBasis, v *verifier) ([]match, int, int) {
+func searchAll(ctx context.Context, opt Options, tl *timeline, descs []QDescriptor, winAt []int, ix *lshIndex, basis *dctBasis, v *verifier) ([]match, int, int) {
 	total := len(tl.frames)
 	workers := opt.MaxConcurrent
 	if workers < 1 {
@@ -204,7 +247,7 @@ func searchAll(ctx context.Context, opt Options, tl *timeline, descs []Descripto
 					return
 				}
 				from, to := c*chunk, minInt((c+1)*chunk, total)
-				covered := newCoverage(total)
+				covered := newCoverage(from, to)
 				var r result
 				for q := from; q < to && q+WindowFrames <= total; q++ {
 					if tl.breakBetween(q, q+WindowFrames-1) {
@@ -217,7 +260,7 @@ func searchAll(ctx context.Context, opt Options, tl *timeline, descs []Descripto
 						if b+WindowFrames > q || q-b < minLag {
 							continue // only earlier windows, at least MinLagSec back; each pair once
 						}
-						if distance(&d, &descs[cw]) > opt.SeedDistance {
+						if distanceQ(&d, &descs[cw]) > opt.SeedDistance {
 							continue
 						}
 						r.seeds++
@@ -253,12 +296,85 @@ func searchAll(ctx context.Context, opt Options, tl *timeline, descs []Descripto
 		seeds += r.seeds
 		verified += r.verified
 	}
-	return dedupeMatches(all), seeds, verified
+	return bridgeDropouts(dedupeMatches(all, tl), tl, v.maxLen), seeds, verified
+}
+
+// maxDropoutFrames is the longest hole a bridged match may span.
+const maxDropoutFrames = 5 * FPS
+
+// bridgeDropouts joins two matches that are one repeat with a hole in it.
+//
+// One airing of a four-minute song had lost 1.3 s to a stream dropout. Every
+// match between that airing and the other three broke at the dropout into a
+// 104 s match and a 145 s match at a lag 1.3 s apart. Three matches, three
+// independent-looking votes for a cut at 104 s - and every airing of the song
+// was cut in two, on a month where nothing else was wrong with it. The same
+// shape cuts a spot when one of its airings has a dropout.
+//
+// The votes are not independent: they all come from the one damaged airing.
+// The evidence for that is the continuation - the same pair of airings agree
+// again within a few seconds, at a lag shifted by no more than the hole. Two
+// such matches are one match, carrying both lags, and the junction is not a
+// boundary anyone voted for.
+func bridgeDropouts(ms []match, tl *timeline, maxLen int) []match {
+	// ms is sorted by AStart, then Lag.
+	used := make([]bool, len(ms))
+	out := make([]match, 0, len(ms))
+	for i := range ms {
+		if used[i] {
+			continue
+		}
+		p := ms[i]
+		for {
+			best := -1
+			bestShift, bestGap := 0, 0
+			for j := i + 1; j < len(ms) && ms[j].AStart <= p.AEnd+maxDropoutFrames; j++ {
+				q := ms[j]
+				if used[j] || q.AStart < p.AEnd-boundaryTol || q.AEnd-p.AStart > maxLen {
+					continue
+				}
+				gapB := q.BStart() - p.BEnd()
+				if gapB < -boundaryTol || gapB > maxDropoutFrames {
+					continue
+				}
+				// Not across a discontinuity: the frames either side of a
+				// break are not seconds apart in broadcast time.
+				if tl.breakBetween(p.AEnd-1, q.AStart) || tl.breakBetween(p.BEnd()-1, q.BStart()) {
+					continue
+				}
+				shift := absInt(q.Lag - p.lagAt(p.AEnd-1))
+				// One change of lag per match. A second dropout in the same
+				// airing leaves the third piece as its own match.
+				if shift > boundaryTol && (p.Split > 0 || q.Split > 0) {
+					continue
+				}
+				gap := q.AStart - p.AEnd
+				if best < 0 || shift < bestShift || (shift == bestShift && gap < bestGap) {
+					best, bestShift, bestGap = j, shift, gap
+				}
+			}
+			if best < 0 {
+				break
+			}
+			q := ms[best]
+			used[best] = true
+			p.Sim = (p.Sim*float64(p.Len()) + q.Sim*float64(q.Len())) / float64(p.Len()+q.Len())
+			if bestShift > boundaryTol {
+				p.Split, p.Lag2 = q.AStart, q.Lag
+			} else if q.Split > 0 {
+				p.Split, p.Lag2 = q.Split, q.Lag2
+			}
+			p.AEnd = q.AEnd
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // dedupeMatches merges matches that describe the same repeat at the same lag
-// - the ones a chunk boundary let through twice.
-func dedupeMatches(ms []match) []match {
+// - the ones a chunk boundary let through twice. Never across a break: two
+// excerpts laid side by side are not one repeat because their lags agree.
+func dedupeMatches(ms []match, tl *timeline) []match {
 	sort.Slice(ms, func(a, b int) bool {
 		if lagKey(ms[a].Lag) != lagKey(ms[b].Lag) {
 			return lagKey(ms[a].Lag) < lagKey(ms[b].Lag)
@@ -269,7 +385,8 @@ func dedupeMatches(ms []match) []match {
 	for _, m := range ms {
 		if n := len(out); n > 0 {
 			last := &out[n-1]
-			if lagKey(last.Lag) == lagKey(m.Lag) && m.AStart <= last.AEnd+boundaryTol {
+			if lagKey(last.Lag) == lagKey(m.Lag) && m.AStart <= last.AEnd+boundaryTol &&
+				!tl.breakBetween(last.AEnd-1, m.AStart) && !tl.breakBetween(last.BEnd()-1, m.BStart()) {
 				if m.AEnd > last.AEnd {
 					last.AEnd = m.AEnd
 				}
@@ -378,6 +495,7 @@ func representativeOf(c Cluster) Occurrence {
 // own cross-matches get a turn. Each frame is therefore explained by at most
 // maxMatchesPerFrame matches.
 type coverage struct {
+	from  int // first query frame this coverage is for
 	n     []uint8
 	byLag map[int][]segment
 }
@@ -386,15 +504,19 @@ type coverage struct {
 // frame.
 const maxMatchesPerFrame = 6
 
-func newCoverage(frames int) *coverage {
-	return &coverage{n: make([]uint8, frames), byLag: map[int][]segment{}}
+// newCoverage covers query frames [from, to). Coverage is about the query
+// side, so a search chunk needs an array the size of its own range, not of the
+// month: sixteen workers each holding the whole timeline's worth was 850 MB
+// for nothing.
+func newCoverage(from, to int) *coverage {
+	return &coverage{from: from, n: make([]uint8, to-from), byLag: map[int][]segment{}}
 }
 
 func lagKey(lag int) int { return (lag + boundaryTol/2) / boundaryTol }
 
 // has reports whether frame f, paired at lag, needs no further verification.
 func (c *coverage) has(f, lag int) bool {
-	if c.n[f] >= maxMatchesPerFrame {
+	if i := f - c.from; i >= 0 && i < len(c.n) && c.n[i] >= maxMatchesPerFrame {
 		return true
 	}
 	k := lagKey(lag)
@@ -410,10 +532,26 @@ func (c *coverage) has(f, lag int) bool {
 
 func (c *coverage) add(m match) {
 	for f := m.AStart; f < m.AEnd; f++ {
-		if c.n[f] < 255 {
-			c.n[f]++
+		if i := f - c.from; i >= 0 && i < len(c.n) && c.n[i] < 255 {
+			c.n[i]++
 		}
 	}
 	k := lagKey(m.Lag)
 	c.byLag[k] = append(c.byLag[k], segment{m.AStart, m.AEnd})
+}
+
+// dumpMatches writes the matches as broadcast times, for reading a run's raw
+// evidence by hand: "a_start a_end b_start sim" per line.
+func dumpMatches(path string, tl *timeline, ms []match) {
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	for _, m := range ms {
+		_, as, _ := tl.locate(m.AStart)
+		_, ae, _ := tl.locate(m.AEnd - 1)
+		_, bs, _ := tl.locate(m.AStart - m.Lag)
+		fmt.Fprintf(f, "%s %s %s %.3f\n", as.Format("2006-01-02T15:04:05.00"), ae.Format("2006-01-02T15:04:05.00"), bs.Format("2006-01-02T15:04:05.00"), m.Sim)
+	}
 }

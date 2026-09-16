@@ -8,12 +8,54 @@ do next. Last updated 2026-09-10, end of the first day on real data.
 ## Status in one paragraph
 
 The method works: on synthetic broadcasts with known truth it finds every
-airing, one cluster per repeat, every spot flag right (19 tests, `-race` clean).
-On real material it runs and produces plausible results — but the **full-month
-run has not yet completed**. Three attempts were made today; the first two were
-stopped for defects they exposed (both fixed), the third was still in its
-feature phase when the day ended. There is no acceptance number for the month
-yet, and there is no spot list to measure recall against.
+airing, one cluster per repeat, every spot flag right (21 tests, `-race` clean).
+The real month runs on the server in 24 min at 5.2 GB peak RSS (ceiling 10).
+The output's fragmentation was measured against its own audio — 287 of 6 813
+spot clusters were wholly the same audio as another — and the two mechanisms
+behind it were found and fixed on 2026-09-16 (below); the month has not yet
+been re-run with those fixes. There is still no spot list, so recall against
+the list is unmeasured.
+
+## 2026-09-16: fragmentation measured and two causes fixed
+
+**How it was measured without a list.** `TestFragmentation` cuts each spot
+cluster's reference airing out of the audio, lays the 6 813 excerpts on a
+timeline with a break between each, and mines them. Representatives that
+repeat each other are the same audio in two clusters. Result on the month:
+1 415 groups share *something* (mostly a 3–5 s tag shared by many creatives of
+one advertiser — those are correctly separate); **287 clusters were wholly
+the same audio as another cluster, in 227 groups.**
+
+**Cause 1 — a dropout in one airing cut every airing.** A 251 s song, aired
+four times; on 2026-08-05 the stream lost 1.3 s in the middle. That airing's
+three matches against the others all broke there, and three "independent"
+votes cut the song into 104 s + 145 s for every airing — and 104 s is
+spot-length. Fixed in `bridgeDropouts` (`miner.go`): a match that continues
+within 5 s on both sides at a lag shifted by no more than the hole is one
+match, carrying both lags (`match.Split/Lag2`). Test:
+`TestADropoutInOneAiringDoesNotCutTheOthers`.
+
+**Cause 2 — soft edges and starved matches.** An element whose end lands
+anywhere within 1.5 s came out as twelve 8–10 s clusters: segments whose ends
+differ by more than 0.5 s never unite. Fixed by a second pass, `merge.go`:
+cluster references are mined against each other (the same machinery as the
+audit) and clusters whose references agree over 80 % of the *longer* are
+joined. Measured against the *shorter* it went badly wrong — a stinger
+absorbed every spot it sat inside — hence the rule.
+
+**Also:** a song cut in pieces was classified as spots. Clusters that follow
+each other in 80 % of airings both ways are pieces of one unit; if the unit is
+over 120 s none of them is a spot. And `dedupeMatches` merged across breaks
+(two excerpts side by side became one 34 s match); fixed.
+
+**On 4 days (2026-08-01/02/04/05), Mac:** 1 089 clusters / 462 spots →
+**933 / 399**, no airing lost (6 423 both), runs identical twice.
+`-dump-matches FILE` writes the raw matches; `MINER_DEBUG_MERGE=1` logs joins.
+
+**Next:** rsync to the server, re-run the month, re-run `TestFragmentation`
+on the new clusters.json (the excerpt cache must be deleted first — it is
+keyed to the old cluster list), and read `summarise.py` again.
+
 
 ## The data
 
@@ -21,6 +63,54 @@ yet, and there is no spot list to measure recall against.
 2026, mp3 22050 Hz stereo 64 kbps, 61 minutes each (consecutive files overlap
 by a minute), 20 GB. **No spot list was supplied with it**; acceptance
 criterion 1 (recall against the list) cannot be measured until it arrives.
+
+## 2026-09-15: the month ran on the server
+
+Server: Ubuntu 24 container (no systemd, cgroup read-only), 20 cores, 62 GB.
+Code and data went over by rsync (`/root/miner`, `/data/MediaforCheck`, 742
+files after the two srv10 duplicates were moved to `/data/extra`).
+
+`/usr/bin/time -v bin/miner -in /data/MediaforCheck -out var/month -temp var/tmp -tz UTC -max-concurrent 16 -no-representatives`
+
+| | result |
+|---|---|
+| wall | **22.3 min** (features + search + clustering, 358 % CPU) |
+| maximum RSS | **9.72 GB** — under the ceiling, far too close to it |
+| clusters | 13 789: 6 813 spots, 6 976 other |
+| spot airings | 40 258, i.e. 1 302 per day — roughly 3× what a station airs |
+| matches | 226 738 from 2.0 M verified of 203 M seed pairs |
+| skipped / exit | 0 / 0 |
+
+**What is right.** The heavy rotation is found and held together: a 21.8 s
+spot 348 times over 31 days (11/day), a 10.8 s spot 395 times over 26 days,
+a 33.6 s spot 241 times over 22 days. Those are real advertisements in one
+cluster each across the whole month.
+
+**What is wrong, in order of priority.**
+
+1. **Too many clusters, most of them small.** 2 296 "spots" air only 2–3
+   times; 593 "spots" are 60–120 s long (song-shaped); 99 636 pairs of clusters
+   have the same length and disjoint dates (the same repeat found twice, or
+   music). The classifier and the fragmentation both need the real list — or
+   twenty minutes of listening to representatives sorted by airing count.
+   Suspects, in order: (a) music that the internal-repeat filter does not
+   catch when a song airs only twice a month with a lag over `MaxRepeatSec`;
+   (b) boundary votes across 30 days of airings splitting long-lived spots
+   when their edges drift; (c) `maxMatchesPerFrame = 6` starving boundary
+   evidence for repeats with hundreds of airings.
+2. ~~Memory is 3× the estimate.~~ **Fixed 2026-09-16**: a soft limit
+   (`debug.SetMemoryLimit`, `-memory-limit`, default 6 GB), batched decode
+   into a pre-reserved timeline, int8 descriptors hashed as they are made,
+   chunk-sized coverage per search worker. Same command, same data:
+   **24.2 min, maximum RSS 5.20 GB** (`time -v`: 5 200 948 kB), 13 800
+   clusters (6 813 spots — identical), exit 0. Live data is about 2.7 GB;
+   the rest is the collector's slack and shrinks with a lower `-memory-limit`.
+   Two months fit under the ceiling with room.
+3. **cgroup measurement is not possible inside this container** (read-only
+   cgroup fs). The container's own `memory.peak` read 31 GB, which includes
+   page cache for 20 GB of mp3 and is not the process. Ask for a run on the
+   host, or a container with cgroup delegation, for the record.
+4. **No spot list yet.** Criterion 1 remains unmeasured.
 
 ## What one real day showed, and what was fixed
 
@@ -91,8 +181,9 @@ Representatives (`-no-representatives` omitted) write one FLAC per cluster to
 
 ## What to do next, in order
 
-1. **Run the month** (command below, ~35 min, nothing else heavy alongside it)
-   and read `summarise.py`'s output: total clusters,
+0. ~~Memory first~~ — done. ~~Fragmentation causes~~ — two found and fixed;
+   re-run the month to measure.
+1. **Read the month** with `summarise.py`: total clusters,
    spot count, airings per day, the "fragmentation candidates" list (same
    length, disjoint in time — the same spot found twice), peak RSS, wall time.
 2. **Get the spot list from the dev**, in whatever format it exists, plus the
