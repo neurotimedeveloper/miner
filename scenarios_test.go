@@ -131,9 +131,12 @@ func TestASongIsANonSpotAndSwallowsNothing(t *testing.T) {
 		plan = append(plan, airing{Name: "S", Start: at, GainDB: float64(i)})
 		plan = append(plan, airing{Name: "song", Start: at + 20.5, GainDB: -float64(i)})
 	}
-	// S also airs once on its own; without that the broadcast cannot tell
+	// S also airs twice on its own; without that the broadcast cannot tell
 	// "S then the song" from one 200 s item, and neither can anything else.
+	// Twice, because one airing that stops early cannot be told from a
+	// trimmed or damaged one, and one damaged airing must not cut the rest.
 	plan = append(plan, airing{Name: "S", Start: 1100, GainDB: -3})
+	plan = append(plan, airing{Name: "S", Start: 1150, GainDB: 2})
 	sb := renderBroadcast(t, dir, 14, 20*60, 20*60, defs, plan)
 	// The truth calls the song a "spot" only so the generator renders a voice;
 	// what the classifier must say is non-spot.
@@ -149,7 +152,7 @@ func TestASongIsANonSpotAndSwallowsNothing(t *testing.T) {
 				t.Errorf("a %.0fs repeat was called a spot", c.DurationSec)
 			}
 		case c.DurationSec > 15 && c.DurationSec < 25:
-			if !c.IsSpot || len(c.Occurrences) != 4 {
+			if !c.IsSpot || len(c.Occurrences) != 5 {
 				t.Errorf("the 20s spot: spot=%v x%d", c.IsSpot, len(c.Occurrences))
 			}
 		default:

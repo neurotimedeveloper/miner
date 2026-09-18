@@ -233,6 +233,14 @@ Two refinements, both forced by measurement:
   song ends, on its solo airing, at a cut three matches agree on, and that
   evidence is carried to the paired airings where the same cut is one match's
   word.
+- **A boundary is a peak of endpoint density.** A live announcement over a
+  fixed music bed - the same nine seconds, six hundred times, a different
+  voice each time - matches its other airings at a lower similarity and the
+  matches end wherever the voice disagreed: endpoints smeared over every
+  half-second of it, each bin with enough events to pass every other test,
+  and the announcement came out as slivers. A cut has to hold 30 % of the
+  endpoint events within three seconds of it. Endpoints at a real boundary
+  concentrate; three real boundaries within three seconds still pass.
 - **Always-adjacent clusters are joined** - two segments that never air apart
   are one repeat, either because a spurious cut split it or because two spots
   have never aired separately, which the broadcast cannot tell apart. Except
@@ -251,9 +259,22 @@ analysis frame's half-width. And the ambiguity is real - two spots that have
 *never* aired apart in two months are reported as one, because nothing in the
 broadcast says otherwise. The moment one of them airs alone, they separate.
 
-Implementation: `cluster.go`.
+Implementation: `cluster.go`, `extend.go`.
 Tests: `TestPairedSpotsDoNotFragment`, `TestASongIsANonSpotAndSwallowsNothing`,
 `TestAlwaysAdjacentClustersAreJoinedUnlessOneIsLong`.
+
+**Edges are then pushed outward by the airings themselves.** The cuts put a
+boundary wherever the broadcast shows one, and a campaign's shared tail IS
+one: five creatives end with the same 8 s. The list names body plus tail as
+the ad, and on the real month 17 % of its airings were found as a body 5-8 s
+short of the tail, 4 % short of a head, after every chaining rule had had
+its turn. So after clustering each cluster's edge moves outward half a
+second at a time while 90 % of its airings agree with the reference over
+the next half-second (`extendClusters`). Where the ad ends and what follows
+varies, agreement collapses; where what follows is the same every time, the
+two are one unit. An edge never enters the airing of a larger cluster of
+spot length, so a spot that always opens for its partner does not take the
+partner with it. Measured on four days: recall 79 % -> 88 %.
 
 ## 5. Spot versus jingle, stinger, music
 

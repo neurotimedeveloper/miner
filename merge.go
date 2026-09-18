@@ -34,22 +34,52 @@ const sameAudioShare = 0.8
 // the larger one's reference and join it. A shared tag is far below the share
 // and does not join anything.
 func mergeSameAudio(ctx context.Context, opt Options, tl *timeline, groups [][]segment) [][]segment {
-	if len(groups) < 2 {
-		return groups
+	// Only groups that could be reported take part; the atomic groups
+	// include thousands of one-off slivers that would cost an hour of
+	// excerpts and join nothing.
+	var rest [][]segment
+	take := groups[:0:0]
+	for _, g := range groups {
+		if len(g) >= 2 && medianLen(g) >= WindowFrames {
+			take = append(take, g)
+		} else {
+			rest = append(rest, g)
+		}
 	}
-	// One excerpt per cluster: the reference airing, as refineAirings picks it.
+	groups = take
+	if len(groups) < 2 {
+		return append(groups, rest...)
+	}
+	// One excerpt per cluster: the reference airing, as refineAirings picks
+	// it, with half a second of its real context either side. A match
+	// cannot reach the last half-second of an excerpt - the score window
+	// needs frames on both sides - and on a 5 s tail that is a fifth of it:
+	// four copies of one tail stayed apart. The context is the airing's own
+	// neighbours, which differ between airings and end the match where the
+	// excerpt ends.
+	const pad = scoreFrames
 	ex := &timeline{}
-	base := make([]int, len(groups)) // excerpt i starts at ex frame base[i]
+	base := make([]int, len(groups))    // the reference's own frame 0, in ex frames
+	exStart := make([]int, len(groups)) // where excerpt i begins, padding included
 	t0 := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i, g := range groups {
 		ref := referenceOf(g)
-		base[i] = len(ex.frames)
-		ex.add("", t0.Add(time.Duration(i)*time.Hour), tl.frames[ref.Start:ref.End])
+		lo, hi := maxInt(ref.Start-pad, 0), minInt(ref.End+pad, len(tl.frames))
+		if tl.breakBetween(lo, ref.Start) {
+			lo = ref.Start
+		}
+		if tl.breakBetween(ref.End-1, hi-1) {
+			hi = ref.End
+		}
+		exStart[i] = len(ex.frames)
+		base[i] = len(ex.frames) + (ref.Start - lo)
+		ex.add("", t0.Add(time.Duration(i)*time.Hour), tl.frames[lo:hi])
 	}
 	whichExcerpt := func(f int) int {
-		return sort.Search(len(base), func(i int) bool { return base[i] > f }) - 1
+		return sort.Search(len(exStart), func(i int) bool { return exStart[i] > f }) - 1
 	}
 
+	refLen := func(i int) int { return referenceOf(groups[i]).Len() }
 	o := opt
 	o.MinLagSec = 0
 	o.DumpMatches = ""
@@ -71,9 +101,15 @@ func mergeSameAudio(ctx context.Context, opt Options, tl *timeline, groups [][]s
 			continue
 		}
 		shift := (m.AStart - base[i]) - (m.BStart() - base[j])
+		// Agreement over the padding is context, not the reference; only
+		// the part inside both references counts.
+		li, lj := refLen(i), refLen(j)
+		inI := minInt(m.AEnd, base[i]+li) - maxInt(m.AStart, base[i])
+		inJ := minInt(m.BEnd(), base[j]+lj) - maxInt(m.BStart(), base[j])
+		shared := minInt(inI, inJ)
 		k := [2]int{i, j}
-		if p, ok := best[k]; !ok || m.Len() > p.shared {
-			best[k] = pair{i, j, m.Len(), shift}
+		if p, ok := best[k]; !ok || shared > p.shared {
+			best[k] = pair{i, j, shared, shift}
 		}
 	}
 	var pairs []pair
@@ -105,10 +141,19 @@ func mergeSameAudio(ctx context.Context, opt Options, tl *timeline, groups [][]s
 		}
 		return x
 	}
-	refLen := func(i int) int { return referenceOf(groups[i]).Len() }
 	for _, p := range pairs {
+		if debugMerge && absInt(refLen(p.i)-550) <= 30 && absInt(refLen(p.j)-550) <= 30 {
+			fmt.Fprintf(os.Stderr, "pair %d(len %d x%d) %d(len %d x%d): shared %d\n", p.i, refLen(p.i), len(groups[p.i]), p.j, refLen(p.j), len(groups[p.j]), p.shared)
+		}
 		long := maxInt(refLen(p.i), refLen(p.j))
-		if float64(p.shared) < sameAudioShare*float64(long) {
+		short := minInt(refLen(p.i), refLen(p.j))
+		// Between two pieces shorter than a spot, containment is enough: a
+		// tail cut at 3.0 s in some airings and 4.7 s in others is one
+		// tail, and its length matters to nothing but the chain it joins.
+		// Between anything longer, the share is of the longer - a 26 s
+		// cut-down is not its 44 s original.
+		if float64(p.shared) < sameAudioShare*float64(long) &&
+			!(long < int(spotMinSec*FPS) && float64(p.shared) >= sameAudioShare*float64(short)) {
 			continue
 		}
 		ri, rj := find(p.i), find(p.j)
@@ -182,6 +227,7 @@ func mergeSameAudio(ctx context.Context, opt Options, tl *timeline, groups [][]s
 		}
 		out = append(out, kept)
 	}
+	out = append(out, rest...)
 	sort.Slice(out, func(a, b int) bool {
 		if out[a][0].Start != out[b][0].Start {
 			return out[a][0].Start < out[b][0].Start

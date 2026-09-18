@@ -52,9 +52,16 @@ over 120 s none of them is a spot. And `dedupeMatches` merged across breaks
 **933 / 399**, no airing lost (6 423 both), runs identical twice.
 `-dump-matches FILE` writes the raw matches; `MINER_DEBUG_MERGE=1` logs joins.
 
-**Next:** rsync to the server, re-run the month, re-run `TestFragmentation`
-on the new clusters.json (the excerpt cache must be deleted first — it is
-keyed to the old cluster list), and read `summarise.py` again.
+**Month re-run with the fixes (server, `var/month3`):** 23.9 min, max RSS
+5.22 GB, **11 145 clusters (5 168 spots, 5 977 other)** — from 13 800 / 6 813.
+`TestFragmentation` on it: **32 whole duplicates** (from 287), about half of
+them the audit's own artefact (refineAirings extends excerpt airings past
+their break, so a "shared" length can exceed the excerpt). Real residue is
+about 15 clusters of 5 168. The tagged 21.8 s spot is now one cluster of 434.
+
+`scripts/evaluate.py clusters.json spots.csv` is the evaluator for when the
+list arrives: recall per airing, clusters per listed spot, spot flag on the
+covered ones. `parse_row` is the one function to adapt to the list's format.
 
 
 ## The data
@@ -111,6 +118,65 @@ cluster each across the whole month.
    page cache for 20 GB of mp3 and is not the process. Ask for a run on the
    host, or a container with cgroup delegation, for the record.
 4. **No spot list yet.** Criterion 1 remains unmeasured.
+
+## 2026-09-17: the spot list arrived; the month measured against it
+
+`real_fm_2026-08/` — 67 TSV files from production, one per ad: 8 912
+airings with file, start and end (whole seconds). `scripts/evaluate.py
+clusters.json real_fm_2026-08/` scores a result against it (add `--days` for
+a subset, `--ad NAME` to see what our output looks like at one ad's airings).
+
+**First measurement (month3, yesterday's code): recall 23 %.** Every ad with
+heavy rotation was cut into pieces: a 44 s spot aired 1 020 times came out
+as 390 whole airings and the rest as 6.5 + 3.9 + 3.8 + 3.1 + 25.6 s pieces.
+Three causes found, in order:
+
+1. **Votes from one damaged airing counted as independent.** A noisy airing
+   broke its matches with thirteen partners at the same points; thirteen
+   "distinct matches" cut the spot for all 1 020 airings. Now a cut inside
+   coverage needs events that do not all share one position besides the
+   cut's own (`collectBoundaries`), and at scale a share of the matches
+   crossing it (`cutSupportPerMille`, 5 %). One airing that stops early -
+   trimmed, damaged, or genuinely solo - no longer cuts the others; a trimmed
+   airing joins by containment (`segmentAt`), the solo case needs two.
+2. **Variant families.** "Delux Resi" in five colours, "casbak" in four
+   lengths, seven "ABB" creatives on one 5 s tail, "premium residence" x6,
+   "Xalq Bank" x5: the shared jingle is its own atomic group and the list's
+   ad is unique part + jingle. `assembleChains` walks each airing and joins
+   segments across firm junctions - A always followed by B where B is a piece
+   (shorter than a spot or at most half of A, and with few distinct
+   neighbours, so a station sting joins nothing) - and airings with the same
+   sequence of groups are one cluster. Two passes, with the same-audio join
+   between them so a tail cut four ways is one tail before the spots are
+   joined to it.
+3. **Songs cut into pieces classed as spots**, dropouts - see 2026-09-16.
+
+**4 days (01/02/04/05 Aug, 1 171 listed airings): 23 % -> 74 % recall, 33 of
+35 covered ads in one cluster.** Month5 (before the relative support and the
+relative piece rule): 58 % recall, 29 % more found but short of the listed
+length by over 3 s, 32 of 38 ads in one cluster, 5.5 GB, 24 min. The scale
+effect is the difference: rules that hold at 20 airings fail at 1 000, where
+two coincident early endings are a certainty.
+
+**Month7 (relative support, relative piece rule, MaxDipSec 2.0, firmShare
+0.7, short-piece containment): 66.8 % recall, 23 % found but short, 36 of
+41 ads in one cluster, 5.3 GB, 25 min.** The bodies of the family ads are
+found with nearly every airing (Xalq Bank Emanet 192 of 193, ABB Temir 83 of
+84) but 5-9 s short: the shared tail does not join. And spots that never
+air apart - every "Omid" creative is followed by "Hilfan boru", 476 and 495
+airings - have no boundary between them in the broadcast; the cut lands
+where the family's shared audio starts, 3 s inside Omid, and both come out
+short. Mutual "always" now joins whatever the counts (`joinBoth`), and a
+piece is anything shorter than its host; on 10 days that took Omid from 0 to
+found and recall 67.8 -> 71.0 %.
+
+**Still missed on 4 days:** "TVNET" promos (a 27 s body shared by dated
+versions, 10 s tails), "casbak 18/21", the remaining "ABB" creatives,
+"RealFM Anons" (9 s, 638 airings, found 15 - it sits inside a repeating
+programme element and is joined to it), "Omid sezon sonuna" (412 airings,
+same). Next: those two are the biggest single losses (1 050 airings) -
+find why a 9 s and a 15 s repeat with hundreds of airings disappear into
+a 200 s unit.
 
 ## What one real day showed, and what was fixed
 

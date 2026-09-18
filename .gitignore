@@ -1,7 +1,18 @@
 /bin/
+
+# Working directories: recordings, results, scratch. Nothing here belongs
+# in the repository; the month's audio alone is 20 GB.
 /var/
+/MediaforCheck/
+
+# No audio ever: fixtures are generated, recordings are supplied locally.
 *.flac
 *.mp3
 *.wav
-.DS_Store
+
+# Personal notes with server credentials.
 Notes.txt
+
+# macOS and Python leftovers.
+.DS_Store
+__pycache__/

@@ -135,10 +135,22 @@ func mineTimeline(ctx context.Context, opt Options, tl *timeline, stats *Stats) 
 	}
 
 	// --- clusters -------------------------------------------------------------
-	groups := buildClusters(matches, minLen)
+	//
+	// The same-audio join runs twice: between the chaining passes, so a
+	// shared tail that the cuts rendered as four groups is one group when
+	// the spots are joined to it - "ABB" has seven creatives on one 5 s tail,
+	// and with the tail in four groups none of the seven was "always
+	// followed" by any of them - and on the finished clusters.
+	groups := assembleClusters(atomicGroups(matches), minLen, func(g [][]segment) [][]segment {
+		return mergeSameAudio(ctx, opt, tl, g)
+	})
 	for i, g := range groups {
 		groups[i] = refineAirings(tl, g)
 	}
+	groups = mergeSameAudio(ctx, opt, tl, groups)
+	groups = extendClusters(tl, groups, opt.SimHigh)
+	// Extended, a piece and the body it belongs to can now be the same
+	// stretch twice; the same-audio join folds them.
 	groups = mergeSameAudio(ctx, opt, tl, groups)
 	var clusters []Cluster
 	for id, g := range groups {
@@ -282,7 +294,7 @@ func searchAll(ctx context.Context, opt Options, tl *timeline, descs []QDescript
 				results[c] = r
 				progMu.Lock()
 				done++
-				opt.progress("search", done*chunk, total)
+				opt.progress("search", minInt(done*chunk, total), total)
 				progMu.Unlock()
 			}
 		}()

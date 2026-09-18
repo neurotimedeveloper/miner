@@ -129,23 +129,48 @@ func TestBoundaryVotesDropLoneCutsAndCarryAgreedOnes(t *testing.T) {
 	}
 }
 
-func TestAlwaysAdjacentClustersAreJoinedUnlessOneIsLong(t *testing.T) {
-	// A and B always abut, three times.
+func TestFirmJunctionsAreJoinedFromEitherSide(t *testing.T) {
+	// A and B always abut, three times: one unit.
 	a := []segment{{100, 500}, {2100, 2500}, {4100, 4500}}
 	b := []segment{{500, 900}, {2500, 2900}, {4500, 4900}}
-	got := mergeAlwaysAdjacent([][]segment{a, b})
-	if len(got) != 1 || got[0][0].Len() != 800 {
+	got := assembleChains([][]segment{a, b}, 1)
+	if len(got) != 1 || len(got[0]) != 3 || got[0][0].Len() != 800 {
 		t.Fatalf("joined = %v", got)
 	}
 	// Same, but B is a song: not joined.
 	song := []segment{{500, 500 + longRepeatFrames}, {2500, 2500 + longRepeatFrames}, {4500, 4500 + longRepeatFrames}}
-	if got := mergeAlwaysAdjacent([][]segment{a, song}); len(got) != 2 {
+	if got := assembleChains([][]segment{a, song}, 1); len(got) != 2 {
 		t.Fatalf("a song was joined to its neighbour: %v", got)
 	}
-	// B sometimes airs without A: not joined.
-	b2 := append(append([]segment(nil), b...), segment{7000, 7400})
-	if got := mergeAlwaysAdjacent([][]segment{a, b2}); len(got) != 2 {
-		t.Fatalf("clusters with different airing counts were joined: %v", got)
+	// A campaign's shared jingle J follows two unique parts, U1 twice and U2
+	// three times, and airs once alone. From J's side no junction is firm;
+	// from U1's and U2's it is, so the words are U1+J, U2+J and J.
+	u1 := []segment{{100, 400}, {5100, 5400}}
+	u2 := []segment{{1900, 2400}, {6900, 7400}, {8900, 9400}}
+	j := []segment{{400, 500}, {2400, 2500}, {5400, 5500}, {7400, 7500}, {9400, 9500}, {12000, 12100}}
+	got = assembleChains([][]segment{u1, u2, j}, 1)
+	if len(got) != 3 {
+		t.Fatalf("%d words, want U1+J, U2+J and J alone: %v", len(got), got)
+	}
+	want := map[int]int{400: 2, 600: 3, 100: 1} // length -> airings
+	for _, g := range got {
+		if want[g[0].Len()] != len(g) {
+			t.Errorf("word of %d frames has %d airings: %v", g[0].Len(), len(g), g)
+		}
+	}
+	// A spot that opens most blocks is not joined to whatever follows it.
+	opener := []segment{{100, 500}, {2100, 2500}, {4100, 4500}, {6100, 6500}, {8100, 8500}}
+	x := []segment{{500, 900}, {2500, 2900}}
+	y := []segment{{4500, 4900}}
+	// (y airs once and takes no part; it is passed through untouched.)
+	got = assembleChains([][]segment{opener, x, y}, 1)
+	for _, g := range got {
+		if g[0].Len() != 400 {
+			t.Fatalf("an opener was joined to a follower it has 40%% of the time: %v", got)
+		}
+	}
+	if len(got[0]) != 5 {
+		t.Fatalf("the opener is not whole: %v", got)
 	}
 }
 

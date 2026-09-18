@@ -17,7 +17,7 @@ const (
 	DefaultSeedDistance     = 0.45
 	DefaultSimHigh          = 0.60
 	DefaultSimLow           = 0.40
-	DefaultMaxDipSec        = 0.6
+	DefaultMaxDipSec        = 2.0
 	DefaultUnionCoverage    = 0.6
 )
 

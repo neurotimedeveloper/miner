@@ -45,7 +45,8 @@ features.go     log-mel frames at 20 fps, 512 ms analysis frame; gain and runnin
 index.go        window descriptors (2-D DCT) and the seeded LSH index; descriptorStream for per-frame queries
 verify.go       lag refinement, growth with hysteresis, the sliding half-second score
 cluster.go      boundary votes, atomic segments, union-find, always-adjacent joining
-merge.go        the second pass: cluster references mined against each other, same-audio clusters joined
+merge.go        cluster references mined against each other, same-audio clusters joined (three times)
+extend.go       edges pushed outward while 90 % of a cluster's airings agree
 classify.go     spot / non-spot with a reason per cluster; pieces of a >120 s unit are not spots
 timeline.go     inputs on one frame axis, with discontinuities recorded
 synth_test.go   the synthetic broadcast with known truth, and the evaluator
@@ -72,6 +73,7 @@ internal/pieces/ file names and manifests -> inputs
 | Never keep a match that sits inside a longer match at another lag | It is the longer repeat's own periodicity; kept, it cuts every song into verse-sized "spots". |
 | Never keep a 61-minute file's overlap with the next | It is a repeat of itself at every hour. |
 | Never count votes from one damaged airing as independent | A 1.3 s dropout in one airing of a song broke its three matches at the same point; three "distinct" votes cut every airing. Continuations within 5 s are bridged into one match with two lags. |
+| Never count a cut's votes without asking where they came from | Thirteen matches from ONE noisy airing cut a 44 s spot into five pieces for all 1 020 airings (recall 23 %). Events must not all share a position; support is a share of the matches crossing (5 %); and a cut must be a peak of endpoint density (30 % within 3 s), or a fuzzy repeat becomes slivers. |
 | Never merge clusters on the share of the SHORTER reference | A 3 s stinger absorbed every spot it sat in; a 44 s spot swallowed its 26 s cut-down. The share is of the longer. |
 | Never dedupe or bridge matches across a break | Excerpts laid side by side matched as one 34 s repeat because their lags agreed; a stinger then absorbed a spot. |
 | Never let a map iteration reach the output | Determinism is an acceptance criterion. |
