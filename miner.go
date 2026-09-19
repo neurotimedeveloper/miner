@@ -148,6 +148,7 @@ func mineTimeline(ctx context.Context, opt Options, tl *timeline, stats *Stats) 
 		groups[i] = refineAirings(tl, g)
 	}
 	groups = mergeSameAudio(ctx, opt, tl, groups)
+	groups = verifyAirings(tl, groups, opt.SimHigh)
 	groups = extendClusters(tl, groups, opt.SimHigh)
 	// Extended, a piece and the body it belongs to can now be the same
 	// stretch twice; the same-audio join folds them.

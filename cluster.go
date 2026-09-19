@@ -595,8 +595,18 @@ func chainOnce(groups [][]segment, gapTol int, takesPart func(g []segment) bool)
 		}
 		return all[a].g < all[b].g
 	})
+	// Adjacent: the next segment begins within gapTol after this one ends,
+	// or overlaps it and extends past it. The same-audio join re-places an
+	// absorbed airing at its root's length, and a variant's head then
+	// overlaps the shared body by the seconds the two variants share;
+	// "casbak 18" was found as a 6.5 s head and a 14.6 s body 2.5 s apart
+	// in the wrong direction, and joined in neither.
 	adjacent := func(i, j int) bool {
-		return j < len(all) && absInt(all[j].seg.Start-all[i].seg.End) <= gapTol
+		if j >= len(all) {
+			return false
+		}
+		a, b := all[i].seg, all[j].seg
+		return b.Start <= a.End+gapTol && b.End > a.End
 	}
 	next := map[[2]int]int{}
 	for i := range all {

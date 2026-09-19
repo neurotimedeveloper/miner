@@ -134,3 +134,79 @@ func extendClusters(tl *timeline, groups [][]segment, simHigh float64) [][]segme
 	}
 	return groups
 }
+
+// verifyAirings makes every airing of every cluster earn its place: each
+// is scored against the cluster's reference, re-placed at the best
+// alignment within verifySlack, and dropped if even that is below simHigh.
+//
+// An airing can arrive misplaced. The same-audio join places an absorbed
+// cluster's airings by the shift between the two references' longest
+// agreement, and when the two references are different parts of one spot
+// whose music repeats a motif, the longest agreement can be the motif at
+// the wrong offset. On the real month a 12 s cluster held 463 airings of one
+// spot, placed anywhere from 2 to 6 s into it - each right for a third of
+// the airings and wrong for the rest, and nothing downstream could tell.
+// The reference and the audio can, at the cost of one cosine per frame per
+// airing per candidate shift.
+const verifySlackSec = 6.0
+
+func verifyAirings(tl *timeline, groups [][]segment, simHigh float64) [][]segment {
+	slack := int(verifySlackSec * FPS)
+	out := make([][]segment, 0, len(groups))
+	for _, g := range groups {
+		if len(g) < 2 {
+			out = append(out, g)
+			continue
+		}
+		ref := referenceOf(g)
+		L := ref.Len()
+		lo, hi := ref.Start+scoreFrames, ref.End-scoreFrames
+		if hi-lo < scoreFrames {
+			out = append(out, g)
+			continue
+		}
+		score := func(start int) float64 {
+			base := start - ref.Start
+			if lo+base < 0 || hi+base > len(tl.frames) || tl.breakBetween(lo+base, hi+base-1) {
+				return -1
+			}
+			var sum float64
+			for t := lo; t < hi; t++ {
+				sum += tl.cosine(t, t+base)
+			}
+			return sum / float64(hi-lo)
+		}
+		kept := make([]segment, 0, len(g))
+		for _, s := range g {
+			if s == ref {
+				kept = append(kept, s)
+				continue
+			}
+			best, bestStart := score(s.Start), s.Start
+			if best < simHigh {
+				// Coarse sweep at half the score window, then a fine one
+				// around the best coarse shift.
+				for d := -slack; d <= slack; d += scoreFrames / 2 {
+					if v := score(s.Start + d); v > best {
+						best, bestStart = v, s.Start+d
+					}
+				}
+				coarse := bestStart
+				for d := -scoreFrames / 2; d <= scoreFrames/2; d++ {
+					if v := score(coarse + d); v > best {
+						best, bestStart = v, coarse+d
+					}
+				}
+			}
+			if best < simHigh {
+				continue
+			}
+			kept = append(kept, segment{bestStart, bestStart + L})
+		}
+		if len(kept) >= 2 {
+			sort.Slice(kept, func(a, b int) bool { return kept[a].Start < kept[b].Start })
+			out = append(out, kept)
+		}
+	}
+	return out
+}

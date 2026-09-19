@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Score a clusters.json against the reference airing list.
 
-    scripts/evaluate.py var/month3.json real_fm_2026-08/ [--tol 3] [--days 2026-08-01,2026-08-02] [-v]
+    scripts/evaluate.py var/month3.json real_fm_2026-08/ [--tol 3] [--days d1,d2] [--per-file] [--ad NAME] [--report DIR]
+
+--report DIR writes the whole picture to DIR: summary.txt (the numbers),
+per_file.csv (one line per reference file: airings, found, short, missing,
+share), airings.csv (every listed airing with its verdict and our closest
+cluster), and missed.txt (the not-found and short airings, grouped by ad,
+readable).
 
 The reference is a directory of TSV files, one per ad, as delivered by
 production: columns id, result_id, name, dur, record_path, start_time,
@@ -137,6 +143,78 @@ def main():
             top = max(cs, key=cs.get)
             flag = "spot" if by_id[top]["IsSpot"] else "NOT SPOT: " + by_id[top]["Reason"][:50]
         print(f"{k:7d} {found:6d} {len(cs):8d} {dur:6.1f}  {a[:45]:45s} {cl}  {flag}")
+    if "--report" in sys.argv:
+        out_dir = sys.argv[sys.argv.index("--report") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        verdicts = []  # (file, ad, record_path, start_s, end_s, verdict, cluster, our_start, our_end)
+        for name, start, dur, x in listed:
+            end = start + dur
+            i = bisect.bisect_right(starts, end)
+            best, hit = 0, None
+            for k in range(max(0, i - 200), i):
+                a_start, a_end, cid, is_spot = airings[k]
+                ov = min(a_end, end) - max(a_start, start)
+                if ov > best:
+                    best, hit = ov, k
+            if best >= dur - tol:
+                v = "found"
+            elif best >= 0.5 * dur:
+                v = "short"
+            elif best > 1:
+                v = "fragment"
+            else:
+                v = "missing"
+            fs = file_start(x["record_path"])
+            ours = ("", "", "")
+            if hit is not None:
+                a_start, a_end, cid, _ = airings[hit]
+                ours = (cid, round(a_start - fs, 1), round(a_end - fs, 1))
+            verdicts.append((x["_file"], name, x["record_path"], x["start_time"], x["end_time"], v) + ours)
+        by_file = defaultdict(lambda: defaultdict(int))
+        names = {}
+        for f, name, *_rest in verdicts:
+            by_file[f][_rest[3]] += 1
+            names[f] = name
+        def fnum(f):
+            b = f.split(".")[0]
+            return int(b) if b.isdigit() else 0
+        with open(os.path.join(out_dir, "per_file.csv"), "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["file", "ad", "airings", "found", "short", "fragment", "missing", "share_found"])
+            for f in sorted(by_file, key=fnum):
+                c = by_file[f]
+                tot = sum(c.values())
+                w.writerow([f, names[f], tot, c["found"], c["short"], c["fragment"], c["missing"], f"{100*c['found']/tot:.1f}"])
+        with open(os.path.join(out_dir, "airings.csv"), "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["file", "ad", "record_path", "start", "end", "verdict", "our_cluster", "our_start", "our_end"])
+            for row in verdicts:
+                w.writerow(row)
+        with open(os.path.join(out_dir, "missed.txt"), "w") as fh:
+            for f in sorted(by_file, key=fnum):
+                bad = [r for r in verdicts if r[0] == f and r[5] != "found"]
+                if not bad:
+                    continue
+                c = by_file[f]
+                tot = sum(c.values())
+                fh.write(f"== {f}  {names[f]}  ({c['found']} of {tot} found)\n")
+                for r in bad:
+                    ours = f"our cluster #{r[6]} at {r[7]}-{r[8]}s" if r[6] != "" else "nothing of ours there"
+                    fh.write(f"   {r[5]:8s} {os.path.basename(r[2])} {r[3]}-{r[4]}s  {ours}\n")
+                fh.write("\n")
+        with open(os.path.join(out_dir, "summary.txt"), "w") as fh:
+            tot = len(verdicts)
+            cnt = defaultdict(int)
+            for r in verdicts:
+                cnt[r[5]] += 1
+            fh.write(f"reference airings {tot} in {len(by_file)} files; our clusters {len(by_id)}\n")
+            for v in ("found", "short", "fragment", "missing"):
+                fh.write(f"{v:9s} {cnt[v]:5d}  {100*cnt[v]/tot:5.1f}%\n")
+            levels = [100, 95, 90, 80, 50]
+            for lvl in levels:
+                k = sum(1 for f in by_file if 100 * by_file[f]["found"] / sum(by_file[f].values()) >= lvl)
+                fh.write(f"files at >= {lvl:3d}% found: {k} of {len(by_file)}\n")
+        print(f"report written to {out_dir}/: summary.txt, per_file.csv, airings.csv, missed.txt")
     if "--per-file" in sys.argv:
         # One line per reference file, the way the list was delivered:
         # file, ad, airings, found, share found. Then how many ads are

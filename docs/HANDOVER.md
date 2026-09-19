@@ -170,6 +170,17 @@ short. Mutual "always" now joins whatever the counts (`joinBoth`), and a
 piece is anything shorter than its host; on 10 days that took Omid from 0 to
 found and recall 67.8 -> 71.0 %.
 
+**Month9 (edge extension, `extend.go`): 83.2 %.** Edges pushed outward
+while 90 % of a cluster's airings agree; never into a larger spot-length
+cluster's airing. **Month10 (peak-density cuts): 87.9 %**, 56 of 67 ads at
+>= 90 %, 49 at >= 95 %; `--per-file` prints the list's own view. What is
+left, by file: RealFM Anons (52 %, a live voice over a fixed bed), Hilfan
+boru (30 %, never airs apart from Omid), casbak 18 (25 %), Premium dovlet
+(18 %), TVNET 5-6 (48 %), Besiktash (0 %). Overlap-tolerant chaining
+(month11) is the next measured change; relaxing the family count raised
+recall 1 % and fragmentation from 1.33 to 1.52 clusters per ad on ten days
+and was dropped.
+
 **Still missed on 4 days:** "TVNET" promos (a 27 s body shared by dated
 versions, 10 s tails), "casbak 18/21", the remaining "ABB" creatives,
 "RealFM Anons" (9 s, 638 airings, found 15 - it sits inside a repeating
